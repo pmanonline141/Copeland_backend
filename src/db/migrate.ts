@@ -6,10 +6,20 @@ import * as schema from './schema/index.js';
 async function runMigration() {
   const connectionString = process.env.MIGRATION_DATABASE_URL;
   if (!connectionString) throw new Error('MIGRATION_DATABASE_URL is required for migrations');
-  const migrationUrl = new URL(connectionString);
-  if (migrationUrl.hostname.includes('pooler')) {
-    throw new Error('Migrations require the direct Postgres connection, not the pooler');
+  let migrationUrl: URL;
+  try {
+    migrationUrl = new URL(connectionString);
+  } catch {
+    throw new Error('MIGRATION_DATABASE_URL must be a valid absolute PostgreSQL connection URL');
   }
+  if (!['postgres:', 'postgresql:'].includes(migrationUrl.protocol)) {
+    throw new Error('MIGRATION_DATABASE_URL must use the postgres:// or postgresql:// protocol');
+  }
+ if (migrationUrl.hostname.includes('pooler') && migrationUrl.port === '6543') {
+  throw new Error(
+    'Migrations cannot use the transaction pooler (port 6543). Use the direct connection or the session pooler (port 5432).'
+  );
+}
   if (migrationUrl.hostname.endsWith('.supabase.co') && migrationUrl.port !== '5432') {
     throw new Error('The Supabase direct migration connection must use port 5432');
   }

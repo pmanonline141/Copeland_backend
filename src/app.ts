@@ -3,7 +3,7 @@ import express, { ErrorRequestHandler } from 'express';
 import helmet from 'helmet';
 import { toNodeHandler } from 'better-auth/node';
 import { auth } from './auth/auth.js';
-import { logger, requestLogger } from './logger.js';
+import { errorLogFields, logger, morganRequestLogger, requestLogger } from './logger.js';
 import { authRateLimit } from './middleware/rate-limits.js';
 import { apiError } from './http/responses.js';
 import { adminRouter } from './routes/admin.js';
@@ -17,6 +17,7 @@ const allowedOrigins = (process.env.FRONTEND_ORIGINS ?? '').split(',').map((orig
 export const app = express();
 
 app.use(requestLogger);
+app.use(morganRequestLogger);
 app.use(helmet());
 app.use(cors({
   origin(origin, callback) {
@@ -40,8 +41,7 @@ app.use('/api/admin', adminRouter);
 app.get('/health', (_req, res) => res.json({ status: 'ok' }));
 
 const errorHandler: ErrorRequestHandler = (error: unknown, req, res, _next) => {
-  const errorName = error instanceof Error ? error.name : 'UnknownError';
-  logger.error({ requestId: req.id, errorName }, 'Request failed');
+  logger.error({ requestId: req.id, ...errorLogFields(error) }, 'Request failed');
   res.status(500).json(apiError('INTERNAL_ERROR', 'An unexpected error occurred'));
 };
 app.use(errorHandler);

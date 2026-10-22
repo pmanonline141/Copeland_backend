@@ -1,6 +1,7 @@
 import { betterAuth } from "better-auth";
 import { drizzleAdapter } from "better-auth/adapters/drizzle";
 import { db } from "../db/index.js";
+import { logger } from "../logger.js";
 import * as schema from "../db/schema/index.js";
 import { sendTransactionalEmail } from "../services/notifications.service.js";
 import {
@@ -34,27 +35,40 @@ export const auth = betterAuth({
     enabled: true,
     requireEmailVerification: true,
     sendResetPassword: async ({ user, url }) => {
-      await sendTransactionalEmail(passwordResetEmail(user.email, user.name, url));
+      await sendTransactionalEmail({
+        ...passwordResetEmail(user.email, user.name, url),
+        emailType: 'password_reset',
+      });
     },
     onPasswordReset: async ({ user }) => {
-      await sendTransactionalEmail(passwordResetConfirmationEmail(user.email, user.name));
+      await sendTransactionalEmail({
+        ...passwordResetConfirmationEmail(user.email, user.name),
+        emailType: 'password_reset_confirmation',
+      });
     },
   },
   emailVerification: {
     sendOnSignUp: true,
     sendVerificationEmail: async ({ user, url }) => {
-      await sendTransactionalEmail(verificationEmail(user.email, user.name, url));
+      await sendTransactionalEmail({
+        ...verificationEmail(user.email, user.name, url),
+        emailType: 'signup_verification',
+      });
     },
   },
   databaseHooks: {
     user: {
       create: {
         after: async (createdUser) => {
-          await sendTransactionalEmail(welcomeEmail(
-            createdUser.email,
-            createdUser.name,
-            `${getFrontendUrl()}/login`,
-          ));
+          logger.info({ userId: createdUser.id }, 'Signup account created');
+          await sendTransactionalEmail({
+            ...welcomeEmail(
+              createdUser.email,
+              createdUser.name,
+              `${getFrontendUrl()}/login`,
+            ),
+            emailType: 'welcome',
+          });
         },
       },
     },
