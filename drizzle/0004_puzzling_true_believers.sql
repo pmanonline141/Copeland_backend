@@ -51,6 +51,7 @@ ALTER TABLE "payout_items" ADD CONSTRAINT "payout_items_partner_id_partners_id_f
 CREATE UNIQUE INDEX "webhook_events_provider_key_unique" ON "webhook_events" USING btree ("provider","event_key");--> statement-breakpoint
 ALTER TABLE "ledger_entries" ADD CONSTRAINT "ledger_entries_order_item_id_order_items_id_fk" FOREIGN KEY ("order_item_id") REFERENCES "public"."order_items"("id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "ledger_entries" ADD CONSTRAINT "ledger_entries_payout_item_id_payout_items_order_item_id_fk" FOREIGN KEY ("payout_item_id") REFERENCES "public"."payout_items"("order_item_id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
+DROP TRIGGER IF EXISTS "enforce_ledger_immutability" ON "ledger_entries";--> statement-breakpoint
 UPDATE "ledger_entries"
 SET "entry_type" = 'adjustment',
     "adjustment_note" = 'Legacy ledger entry migrated to typed ledger'
