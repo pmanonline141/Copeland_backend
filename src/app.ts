@@ -45,3 +45,5 @@ const errorHandler: ErrorRequestHandler = (error: unknown, req, res, _next) => {
   res.status(500).json(apiError('INTERNAL_ERROR', 'An unexpected error occurred'));
 };
 app.use(errorHandler);
+
+export default app;
