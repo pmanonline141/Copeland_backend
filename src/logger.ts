@@ -6,7 +6,9 @@ import { pinoHttp } from 'pino-http';
 // Pretty output only in local development. Tests, production and Vercel stay on plain JSON.
 // Set LOG_PRETTY=false to force JSON locally.
 const prettyLogs =
-  process.env.NODE_ENV === 'development' && process.env.LOG_PRETTY !== 'false';
+   process.env.NODE_ENV === 'development' &&
+  process.env.VERCEL !== '1' &&
+  process.env.LOG_PRETTY !== 'false';
 
 export const logger = pino({
   level: process.env.LOG_LEVEL ?? 'info',
