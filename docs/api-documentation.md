@@ -942,3 +942,257 @@ export async function apiFetch<T>(path: string, init: RequestInit = {}): Promise
 ```
 
 For checkout, payment initialization, partner applications, and payout operations, disable duplicate submissions while a request is pending and display the backend error code/message when the request fails.
+
+## 15. Authentication API: complete frontend reference
+
+The backend mounts Better Auth at `/api/auth`. The routes below are the email/password and session routes enabled by this project. All examples assume:
+
+```ts
+const API_BASE_URL = 'https://api.example.com';
+
+async function authRequest<T>(path: string, init: RequestInit = {}) {
+  const response = await fetch(`${API_BASE_URL}/api/auth${path}`, {
+    ...init,
+    credentials: 'include',
+    headers: {
+      'Content-Type': 'application/json',
+      ...(init.headers ?? {}),
+    },
+  });
+
+  const body = await response.json().catch(() => null);
+  if (!response.ok) throw { status: response.status, body };
+  return body as T;
+}
+```
+
+Never store the session token in localStorage or send a password to any endpoint other than the auth API. The browser stores the secure session cookie. Always use `credentials: 'include'`, including for `GET /api/auth/get-session`.
+
+### Auth route summary
+
+| Method | Route | Authentication | Frontend use |
+|---|---|---|---|
+| POST | `/api/auth/sign-up/email` | Public | Create an account |
+| POST | `/api/auth/sign-in/email` | Public | Sign in |
+| POST | `/api/auth/sign-out` | Session | Sign out |
+| GET | `/api/auth/get-session` | Session optional | Restore the current user |
+| POST | `/api/auth/send-verification-email` | Public | Resend verification email |
+| GET | `/api/auth/verify-email?token=...` | Public | Consume email verification link |
+| POST | `/api/auth/forget-password` | Public | Request reset email |
+| POST | `/api/auth/reset-password` | Public | Set a new password |
+
+Better Auth may include additional response metadata or headers in a patch release. Frontends should treat the documented fields below as the application contract and ignore unknown fields.
+
+### `POST /api/auth/sign-up/email`
+
+Creates a buyer account. Email verification is required before protected buyer, supplier, shipping, staff, or admin workflows can be used.
+
+Required JSON body:
+
+```json
+{
+  "name": "Ada Buyer",
+  "email": "ada@example.com",
+  "password": "A-long-password-123"
+}
+```
+
+Field rules:
+
+- `name`: required non-empty string.
+- `email`: required valid email address; normalize user input to lowercase in the UI.
+- `password`: required string; enforce a strong password in the UI. The server hashes it and never returns it.
+- Do not send `role`; the backend sets the default role to `buyer` and rejects client-controlled role assignment.
+
+Typical success: `200` or `201`, with the created user/session payload. A verification email is sent automatically. Show “Check your email to verify your account” rather than routing directly to protected pages.
+
+Example:
+
+```ts
+await authRequest('/sign-up/email', {
+  method: 'POST',
+  body: JSON.stringify({ name, email, password }),
+});
+```
+
+Common errors:
+
+- `400` — invalid or incomplete fields.
+- `422` — email already registered or password rejected by Better Auth validation.
+- `429` — auth rate limit exceeded; wait before retrying.
+
+### `POST /api/auth/sign-in/email`
+
+Signs in with email and password and creates a cookie-backed session.
+
+Required JSON body:
+
+```json
+{
+  "email": "ada@example.com",
+  "password": "A-long-password-123"
+}
+```
+
+Optional body field:
+
+- `callbackURL`: frontend URL to use after an auth redirect, when the frontend uses redirect-based handling.
+
+Example:
+
+```ts
+await authRequest('/sign-in/email', {
+  method: 'POST',
+  body: JSON.stringify({ email, password }),
+});
+const session = await authRequest('/get-session');
+```
+
+Success returns the authenticated user/session information and sets a session cookie. The user object includes `id`, `name`, `email`, `emailVerified`, and `role` when available. Roles are `buyer`, `supplier`, `shipping`, `staff`, or `admin`.
+
+Common errors:
+
+- `401` — invalid email/password.
+- `403` — email verification is required; show a resend-verification action.
+- `429` — too many sign-in attempts.
+
+### `POST /api/auth/sign-out`
+
+Ends the current session and clears the session cookie.
+
+No request body is required:
+
+```ts
+await authRequest('/sign-out', { method: 'POST' });
+// Clear frontend memory and navigate to /login.
+```
+
+Success is normally `200` with a success response or an empty JSON object. Treat an already-expired session as signed out. Common errors are `401` for a missing/expired session and `429` for rate limiting.
+
+### `GET /api/auth/get-session`
+
+Restores the current session after page load or refresh.
+
+```ts
+const session = await authRequest<{
+  user: {
+    id: string;
+    name: string;
+    email: string;
+    emailVerified: boolean;
+    role: 'buyer' | 'supplier' | 'shipping' | 'staff' | 'admin';
+  };
+  session: { id: string; expiresAt: string };
+}>('/get-session');
+```
+
+Success returns `{ user, session }`. When there is no valid cookie, the response is commonly `200` with `null` or `401`, depending on Better Auth response handling. Treat either as unauthenticated; do not display a server error.
+
+Use the returned role to select the dashboard. Do not assume that a role implies partner approval; supplier and shipping actions additionally require an approved partner account.
+
+### `POST /api/auth/send-verification-email`
+
+Resends the verification email. Use this after sign-up or when sign-in reports that verification is required.
+
+Required JSON body:
+
+```json
+{
+  "email": "ada@example.com",
+  "callbackURL": "https://app.example.com/email-verified"
+}
+```
+
+`callbackURL` is the frontend destination after the user clicks the email link and must be an allowed frontend origin. The endpoint should return a generic success response even when the account does not exist, so the UI should always show the same message: “If an account exists, a verification email has been sent.”
+
+Common errors: `400` for invalid email/callback URL and `429` for too many requests.
+
+### `GET /api/auth/verify-email?token=...`
+
+Consumes the one-time token from the verification email. This is normally opened by the browser, not called with JSON.
+
+Frontend route example:
+
+```ts
+const params = new URLSearchParams(window.location.search);
+await fetch(`${API_BASE_URL}/api/auth/verify-email?${params}`, {
+  credentials: 'include',
+});
+```
+
+Success: the email is marked verified and the user can sign in. Redirect to the frontend’s verified-success screen. Common errors are `400` for a missing/malformed token and `401` or `410` for an expired or already-used token. Provide a “Send verification email again” action rather than retrying the same token.
+
+### `POST /api/auth/forget-password`
+
+Requests a password-reset email. The endpoint should not reveal whether an email exists.
+
+Required JSON body:
+
+```json
+{
+  "email": "ada@example.com",
+  "redirectTo": "https://app.example.com/reset-password"
+}
+```
+
+`redirectTo` must be an allowed frontend origin. Always show the same confirmation message, such as “If an account exists, check your email for a reset link.” Common errors are `400` for invalid input and `429` for repeated requests.
+
+### `POST /api/auth/reset-password`
+
+Sets a new password using the token from the reset link.
+
+Required JSON body:
+
+```json
+{
+  "newPassword": "A-new-strong-password-456",
+  "token": "reset-token-from-email"
+}
+```
+
+After success, send the user to sign-in rather than assuming they are signed in. The backend sends a password-reset confirmation email.
+
+Common errors:
+
+- `400` — missing token/password or invalid password.
+- `401` or `410` — expired, invalid, or already-used token.
+- `429` — too many reset attempts.
+
+### Recommended auth state flow
+
+1. On application start, call `GET /api/auth/get-session`.
+2. If the result is unauthenticated, show public pages or redirect protected routes to `/login`.
+3. On sign-up, show the verification-pending screen.
+4. On sign-in, handle the unverified-email response with a resend button.
+5. After sign-in, fetch the session and route by `user.role`.
+6. For every protected API call, include `credentials: 'include'`.
+7. On `401`, refresh session state once and redirect to sign-in if still unauthenticated.
+8. On `403`, show a permission or partner-approval message; do not repeatedly retry.
+9. On sign-out, clear cached user data and return to the public site.
+
+### Auth error handling example
+
+```ts
+try {
+  await authRequest('/sign-in/email', {
+    method: 'POST',
+    body: JSON.stringify({ email, password }),
+  });
+} catch (failure) {
+  const error = failure as { status?: number; body?: { message?: string; error?: { message?: string } } };
+  const message = error.body?.error?.message ?? error.body?.message;
+
+  if (error.status === 401) showFieldError('email', 'Email or password is incorrect.');
+  else if (error.status === 403) showVerificationPrompt();
+  else if (error.status === 429) showMessage('Too many attempts. Please try again later.');
+  else showMessage(message ?? 'Unable to sign in. Please try again.');
+}
+```
+
+## 16. Frontend implementation notes
+
+- The backend CORS policy only permits origins configured in `FRONTEND_ORIGINS`; browser requests from an unapproved origin fail before reaching a route.
+- Cookies must be sent cross-origin with `credentials: 'include'`; the frontend fetch wrapper should set this centrally.
+- Auth, checkout, application, and webhook-related endpoints are rate limited. Disable buttons while requests are pending.
+- Never trust client-provided prices, totals, roles, commission values, payout values, or approval status.
+- Keep payment references and order IDs available for support, but do not expose server secrets or Paystack secret keys.
