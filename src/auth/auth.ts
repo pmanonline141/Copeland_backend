@@ -1,4 +1,4 @@
-import { betterAuth } from "better-auth";
+ import { betterAuth } from "better-auth";
 import { drizzleAdapter } from "better-auth/adapters/drizzle";
 import { db } from "../db/index.js";
 import { logger } from "../logger.js";
@@ -19,6 +19,12 @@ function getFrontendUrl() {
   return new URL(configured).origin;
 }
 
+function getPasswordResetUrl(url: string) {
+  const resetUrl = new URL(url);
+  resetUrl.searchParams.set('callbackURL', `${getFrontendUrl()}/reset-password`);
+  return resetUrl.toString();
+}
+
 export const auth = betterAuth({
   secret: process.env.BETTER_AUTH_SECRET,
   baseURL: process.env.BETTER_AUTH_URL,
@@ -36,7 +42,7 @@ export const auth = betterAuth({
     requireEmailVerification: true,
     sendResetPassword: async ({ user, url }) => {
       await sendTransactionalEmail({
-        ...passwordResetEmail(user.email, user.name, url),
+        ...passwordResetEmail(user.email, user.name, getPasswordResetUrl(url)),
         emailType: 'password_reset',
       });
     },
@@ -77,5 +83,21 @@ export const auth = betterAuth({
     additionalFields: {
       role: { type: "string", required: false, defaultValue: "buyer", input: false }
     }
-  }
+  },
+  
+  // --- CRITICAL FIX: ADD TRUSTED ORIGINS HERE ---
+  trustedOrigins: [
+    "http://localhost:3000",
+    "http://localhost:4000",
+    "https://copeland.africa",
+    "https://www.copeland.africa"
+  ],
+
+  advanced: {
+    useSecureCookies: process.env.NODE_ENV === "production",
+    defaultCookieAttributes: {
+      sameSite: "lax", 
+      secure: process.env.NODE_ENV === "production",
+    },
+  },
 });

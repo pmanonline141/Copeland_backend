@@ -3,7 +3,8 @@ import { user } from './auth.js';
 
 export const partners = pgTable('partners', {
   id: uuid('id').defaultRandom().primaryKey(),
-  userId: text('user_id').notNull().references(() => user.id).unique(),
+  userId: text('user_id').references(() => user.id).unique(),
+  applicationTokenHash: text('application_token_hash'),
   businessName: text('business_name').notNull(),
   companyName: text('company_name'),
   cacNumber: text('cac_number'),

@@ -1,12 +1,14 @@
 import { Router } from 'express';
 import crypto from 'crypto';
-import { and, eq } from 'drizzle-orm';
+import { and, eq, sql } from 'drizzle-orm';
 import { db } from '../db/index.js';
 import { auditLog, partnerDocuments, partners, user } from '../db/schema/index.js';
 import { requireAuth, requirePartnerAccount, requireRole } from '../middleware/auth.js';
 import { sendTransactionalEmail } from '../services/notifications.service.js';
 import { partnerApplicationReceivedEmail, partnerReviewEmail } from '../services/email-templates.js';
-import { createPartnerDocumentDownload, createPartnerDocumentUpload } from '../services/supabase-storage.service.js';
+import { createPartnerDocumentSignature, markImagesAttached } from '../lib/cloudinary.js';
+// If this line shows a red underline, open the src/auth folder and point it at the file that exports `auth`.
+import { auth } from '../auth/auth.js';
 import { validateBody } from '../middleware/validation.js';
 import { applicationRateLimit } from '../middleware/rate-limits.js';
 import { apiError } from '../http/responses.js';
@@ -20,9 +22,29 @@ import {
 
 export const partnersRouter = Router();
 
-partnersRouter.post('/apply', applicationRateLimit, requireAuth, validateBody(partnerApplicationSchema), async (req, res) => {
+const DOC_TYPES = ['cac', 'tin', 'id'];
+const sha256 = (value: string) => crypto.createHash('sha256').update(value).digest('hex');
+
+/** Lets a guest add documents to ONE pending application using the token returned when they applied. */
+async function requireApplicationToken(req: any, res: any, next: any) {
   try {
-    const userId = req.user!.id;
+    const token = req.header('x-application-token');
+    const [application] = await db.select().from(partners).where(eq(partners.id, String(req.params.id)));
+    const valid = !!token && !!application?.applicationTokenHash && application.status === 'pending'
+      && crypto.timingSafeEqual(Buffer.from(sha256(token)), Buffer.from(application.applicationTokenHash));
+    if (!valid) {
+      return res.status(401).json(apiError('INVALID_APPLICATION_TOKEN', 'This application link is invalid or has expired'));
+    }
+    req.application = application;
+    next();
+  } catch (error) {
+    next(error);
+  }
+}
+
+// Public: anyone can apply. No account is needed until the application is approved.
+partnersRouter.post('/apply', applicationRateLimit, validateBody(partnerApplicationSchema), async (req, res) => {
+  try {
     const {
       companyName,
       businessName = companyName,
@@ -51,17 +73,25 @@ partnersRouter.post('/apply', applicationRateLimit, requireAuth, validateBody(pa
       return res.status(400).json(apiError('INVALID_APPLICATION', 'Complete company, registration, contact, address, capability, and partner type details are required'));
     }
 
-    const [existing] = await db.select().from(partners).where(eq(partners.userId, userId));
-    if (existing) return res.status(400).json(apiError('APPLICATION_EXISTS', 'Application already exists'));
+    const email = contactEmail.trim().toLowerCase();
+    const [existing] = await db.select({ id: partners.id }).from(partners).where(and(
+      sql`(lower(${partners.contactEmail}) = ${email} or ${partners.cacNumber} = ${cacNumber.trim()})`,
+      sql`${partners.status} in ('pending', 'approved', 'suspended')`,
+    ));
+    if (existing) {
+      return res.status(409).json(apiError('APPLICATION_EXISTS', 'An application with this email or CAC number already exists. We will contact you after review.'));
+    }
 
+    const applicationToken = crypto.randomBytes(32).toString('hex');
     const [partner] = await db.insert(partners).values({
-      userId,
+      userId: null,
+      applicationTokenHash: sha256(applicationToken),
       businessName: businessName.trim(),
       companyName: companyName.trim(),
       cacNumber: cacNumber.trim(),
       tin: tin.trim(),
       contactName: contactName.trim(),
-      contactEmail: contactEmail.trim().toLowerCase(),
+      contactEmail: email,
       contactPhone: contactPhone.trim(),
       address: address.trim(),
       capabilities,
@@ -69,38 +99,110 @@ partnersRouter.post('/apply', applicationRateLimit, requireAuth, validateBody(pa
       status: 'pending',
     }).returning();
 
-    await sendTransactionalEmail(partnerApplicationReceivedEmail(
-      partner.contactEmail!,
-      partner.contactName!,
-    ));
-    res.status(201).json(partner);
+      try {
+      await sendTransactionalEmail(partnerApplicationReceivedEmail(
+        partner.contactEmail!,
+        partner.contactName!,
+      ));
+    } catch (emailError) {
+      console.error('Partner confirmation email failed', emailError);
+    }
+
+    // The token goes back once, to the applicant's browser only, so it can upload documents.
+    res.status(201).json({ id: partner.id, status: partner.status, applicationToken });
   } catch (error) {
     res.status(500).json(apiError('PARTNER_APPLICATION_FAILED', error instanceof Error ? error.message : 'Unable to submit partner application'));
   }
 });
 
-partnersRouter.post('/documents/upload-url', requireAuth, requirePartnerAccount, validateBody(documentUploadSchema), async (req, res) => {
+// Public (token-protected): document upload for a guest application.
+partnersRouter.post('/applications/:id/documents/sign-upload', applicationRateLimit, requireApplicationToken, validateBody(documentUploadSchema), async (req, res) => {
   try {
-    const { documentType, fileName } = req.body as { documentType?: string; fileName?: string };
-    if (!['cac', 'tin', 'id'].includes(documentType ?? '') || !fileName || fileName.length > 120) {
-      return res.status(400).json(apiError('INVALID_DOCUMENT', 'A supported document type and file name are required'));
+    const { documentType } = req.body as { documentType?: string };
+    if (!DOC_TYPES.includes(documentType ?? '')) {
+      return res.status(400).json(apiError('INVALID_DOCUMENT', 'A supported document type is required'));
     }
-    const safeFileName = fileName.replace(/[^a-zA-Z0-9._-]/g, '_');
-    const storagePath = `${req.partnerId}/${documentType}/${crypto.randomUUID()}-${safeFileName}`;
-    const upload = await createPartnerDocumentUpload(storagePath);
+    res.status(201).json(createPartnerDocumentSignature((req as any).application.id, documentType!));
+  } catch (error) {
+    res.status(500).json(apiError('DOCUMENT_SIGN_FAILED', error instanceof Error ? error.message : 'Unable to create document upload signature'));
+  }
+});
+
+partnersRouter.post('/applications/:id/documents/attach', applicationRateLimit, requireApplicationToken, async (req, res) => {
+  try {
+    const { documentType, url } = req.body as { documentType: string; url: string };
+    const cloud = process.env.CLOUDINARY_CLOUD_NAME;
+    if (!url || !DOC_TYPES.includes(documentType) || !cloud || !url.startsWith(`https://res.cloudinary.com/${cloud}/`)) {
+      return res.status(400).json(apiError('INVALID_ATTACHMENT', 'Document type and a valid upload URL are required'));
+    }
+    const [document] = await db.insert(partnerDocuments).values({
+      partnerId: (req as any).application.id,
+      documentType,
+      storagePath: url,
+    }).returning();
+    // Uploads are tagged "pending" and swept after 24h; this keeps the document.
+    await markImagesAttached([url]);
+    res.status(201).json(document);
+  } catch (error) {
+    res.status(500).json(apiError('DOCUMENT_ATTACH_FAILED', error instanceof Error ? error.message : 'Unable to attach document'));
+  }
+});
+
+/** Finds or creates the login for an approved partner. No password is emailed; they set their own via a link. */
+async function provisionPartnerAccount(partner: typeof partners.$inferSelect) {
+  const email = partner.contactEmail!.toLowerCase();
+  const [existingUser] = await db.select().from(user).where(eq(user.email, email));
+  if (existingUser) {
+    if (existingUser.role === 'admin' || existingUser.role === 'staff') {
+      throw new Error('INTERNAL_ACCOUNT');
+    }
+    return { userId: existingUser.id, newAccount: false };
+  }
+  const ctx = await auth.$context;
+  const created = await ctx.internalAdapter.createUser(
+    { email, name: partner.contactName ?? partner.businessName, emailVerified: true, role: partner.partnerType },
+    { method: 'admin' },
+  );
+  await ctx.internalAdapter.linkAccount({
+    userId: created.id,
+    providerId: 'credential',
+    accountId: created.id,
+    password: await ctx.password.hash(crypto.randomBytes(32).toString('hex')),
+  });
+  return { userId: created.id, newAccount: true };
+}
+
+partnersRouter.post('/documents/sign-upload', requireAuth, requirePartnerAccount, validateBody(documentUploadSchema), async (req, res) => {
+  try {
+    const { documentType } = req.body as { documentType?: string };
+    if (!['cac', 'tin', 'id'].includes(documentType ?? '')) {
+      return res.status(400).json(apiError('INVALID_DOCUMENT', 'A supported document type is required'));
+    }
+    
+    const signature = createPartnerDocumentSignature(req.partnerId!, documentType!);
+    res.status(201).json(signature);
+  } catch (error) {
+    res.status(500).json(apiError('DOCUMENT_SIGN_FAILED', error instanceof Error ? error.message : 'Unable to create document upload signature'));
+  }
+});
+
+partnersRouter.post('/documents/attach', requireAuth, requirePartnerAccount, async (req, res) => {
+  try {
+    const { documentType, url } = req.body as { documentType: string; url: string };
+    if (!url || !['cac', 'tin', 'id'].includes(documentType)) {
+      return res.status(400).json(apiError('INVALID_ATTACHMENT', 'Document type and URL are required'));
+    }
+
     const [document] = await db.insert(partnerDocuments).values({
       partnerId: req.partnerId!,
-      documentType: documentType!,
-      storagePath,
-    }).returning({ id: partnerDocuments.id });
-    res.status(201).json({
-      documentId: document.id,
-      path: upload.path,
-      token: upload.token,
-      signedUrl: upload.signedUrl,
-    });
+      documentType,
+      storagePath: url, // Store the Cloudinary URL as the path
+    }).returning();
+    await markImagesAttached([url]);
+
+    res.status(201).json(document);
   } catch (error) {
-    res.status(500).json(apiError('DOCUMENT_UPLOAD_URL_FAILED', error instanceof Error ? error.message : 'Unable to create document upload URL'));
+    res.status(500).json(apiError('DOCUMENT_ATTACH_FAILED', error instanceof Error ? error.message : 'Unable to attach document'));
   }
 });
 
@@ -111,10 +213,11 @@ partnersRouter.get('/:id/documents/:documentId/download-url', requireAuth, requi
     if (!document || document.partnerId !== String(req.params.id)) {
       return res.status(404).json(apiError('DOCUMENT_NOT_FOUND', 'Document not found'));
     }
-    const signed = await createPartnerDocumentDownload(document.storagePath);
-    res.json({ signedUrl: signed.signedUrl });
+    // For Cloudinary, we just return the stored URL (or a signed one if private)
+    // Since we didn't set 'type: private', it's a direct URL.
+    res.json({ signedUrl: document.storagePath });
   } catch (error) {
-    res.status(500).json(apiError('DOCUMENT_DOWNLOAD_URL_FAILED', error instanceof Error ? error.message : 'Unable to create document download URL'));
+    res.status(500).json(apiError('DOCUMENT_DOWNLOAD_URL_FAILED', error instanceof Error ? error.message : 'Unable to get document URL'));
   }
 });
 
@@ -125,9 +228,24 @@ partnersRouter.post('/:id/review', requireAuth, requireRole('admin'), validateBo
       return res.status(400).json(apiError('INVALID_PARTNER_REVIEW', 'Review status must be approved, rejected, or suspended'));
     }
 
+    let account: { userId: string; newAccount: boolean } | null = null;
+    if (status === 'approved') {
+      const [applicant] = await db.select().from(partners).where(eq(partners.id, String(req.params.id)));
+      if (!applicant) return res.status(404).json(apiError('PARTNER_NOT_FOUND', 'Partner not found'));
+      try {
+        account = await provisionPartnerAccount(applicant);
+      } catch (error) {
+        if (error instanceof Error && error.message === 'INTERNAL_ACCOUNT') {
+          return res.status(409).json(apiError('INTERNAL_ACCOUNT', 'This email belongs to an internal Copeland account and cannot become a partner'));
+        }
+        throw error;
+      }
+    }
+
     const updated = await db.transaction(async (tx) => {
       const [partner] = await tx.update(partners)
         .set({
+          ...(account ? { userId: account.userId } : {}),
           status: status!,
           reviewNote: reviewNote?.trim() || null,
           reviewedBy: req.user!.id,
@@ -136,10 +254,10 @@ partnersRouter.post('/:id/review', requireAuth, requireRole('admin'), validateBo
         })
         .where(eq(partners.id, String(req.params.id)))
         .returning();
-      if (partner && status === 'approved') {
+      if (partner && status === 'approved' && account) {
         await tx.update(user)
           .set({ role: partner.partnerType, updatedAt: new Date() })
-          .where(eq(user.id, partner.userId));
+          .where(eq(user.id, account.userId));
       }
       if (partner) {
         await tx.insert(auditLog).values({
@@ -153,6 +271,14 @@ partnersRouter.post('/:id/review', requireAuth, requireRole('admin'), validateBo
       return partner;
     });
     if (!updated) return res.status(404).json(apiError('PARTNER_NOT_FOUND', 'Partner not found'));
+
+    // New account: email a "set your password" link so they can log in. Never blocks the decision.
+    if (account?.newAccount) {
+      try {
+        const base = process.env.FRONTEND_URL ?? process.env.FRONTEND_ORIGINS?.split(',')[0]?.trim() ?? '';
+        await auth.api.requestPasswordReset({ body: { email: updated.contactEmail!, redirectTo: `${base}/reset-password` } });
+      } catch { /* an admin can resend later */ }
+    }
 
     await sendTransactionalEmail(partnerReviewEmail(
       updated.contactEmail!,
@@ -275,6 +401,19 @@ partnersRouter.post('/bank-details/verify', requireAuth, requirePartnerAccount, 
     res.json(updatedPartner);
   } catch (error) {
     res.status(500).json(apiError('BANK_DETAILS_UPDATE_FAILED', error instanceof Error ? error.message : 'Unable to verify bank details'));
+  }
+});
+
+partnersRouter.get('/:id', requireAuth, requireRole('admin', 'staff'), async (req, res) => {
+  try {
+    const [partner] = await db.select().from(partners).where(eq(partners.id, String(req.params.id)));
+    if (!partner) return res.status(404).json(apiError('PARTNER_NOT_FOUND', 'Partner not found'));
+    
+    const documents = await db.select().from(partnerDocuments).where(eq(partnerDocuments.partnerId, partner.id));
+    
+    res.json({ ...partner, documents });
+  } catch (error) {
+    res.status(500).json(apiError('PARTNER_FETCH_FAILED', error instanceof Error ? error.message : 'Unable to fetch partner details'));
   }
 });
 
