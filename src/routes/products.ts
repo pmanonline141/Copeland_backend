@@ -1,4 +1,9 @@
 import { Router } from 'express';
+import { auth } from '../auth/auth.js';
+import { fromNodeHeaders } from 'better-auth/node';
+import { eq } from 'drizzle-orm';
+import { db } from '../db/index.js';
+import { partners } from '../db/schema/index.js';
 import { ProductService } from '../services/products.service.js';
 import { requireAuth, requireRole, requireApprovedPartner } from '../middleware/auth.js';
 import { uploadSignRateLimit } from '../middleware/rate-limits.js';
@@ -47,7 +52,35 @@ productsRouter.post('/images/sign', uploadSignRateLimit, requireAuth, requireRol
 // ---------- Public detail ----------
 
 productsRouter.get('/:id', async (req, res) => {
-  const product = await ProductService.getLiveProduct(String(req.params.id));
+  const productId = String(req.params.id);
+
+  // If requester is signed in as admin/staff or product owner, return product regardless of moderation status
+  const session = await auth.api.getSession({
+    headers: fromNodeHeaders(req.headers),
+  }).catch(() => null);
+
+  if (session) {
+    const role = session.user.role;
+    if (role === 'admin' || role === 'staff') {
+      const product = await ProductService.getProductById(productId);
+      if (!product) return res.status(404).json(apiError('PRODUCT_NOT_FOUND', 'Product not found'));
+      return res.json(product);
+    }
+
+    if (role === 'supplier') {
+      const [partner] = await db.select({ id: partners.id })
+        .from(partners)
+        .where(eq(partners.userId, session.user.id));
+
+      if (partner) {
+        const product = await ProductService.getPartnerProduct(productId, partner.id);
+        if (product) return res.json(product);
+      }
+    }
+  }
+
+  // Public buyers: only approved/live products
+  const product = await ProductService.getLiveProduct(productId);
   if (!product) return res.status(404).json(apiError('PRODUCT_NOT_FOUND', 'Product not found'));
   res.json(product);
 });

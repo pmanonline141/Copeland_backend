@@ -1,6 +1,16 @@
-import { pgTable, uuid, text, integer, timestamp, boolean, unique } from 'drizzle-orm/pg-core';
+import { pgTable, uuid, text, integer, timestamp, boolean, unique, jsonb } from 'drizzle-orm/pg-core';
 import { products } from './products.js';
 import { partners } from './partners.js';
+
+export type ShippingAddress = {
+  addressLine1?: string;
+  addressLine2?: string;
+  city?: string;
+  state?: string;
+  postalCode?: string;
+  landmark?: string;
+  notes?: string;
+};
 
 export const orders = pgTable('orders', {
   id: uuid('id').defaultRandom().primaryKey(),
@@ -8,6 +18,7 @@ export const orders = pgTable('orders', {
   buyerName: text('buyer_name'),
   buyerEmail: text('buyer_email').notNull(),
   buyerPhone: text('buyer_phone'),
+  shippingAddress: jsonb('shipping_address').$type<ShippingAddress>(),
   orderNumber: text('order_number').notNull(),
   totalAmountKobo: integer('total_amount_kobo').notNull(),
   status: text('status').default('pending_payment').notNull(),

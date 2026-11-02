@@ -28,6 +28,18 @@ app.use(cors({
 }));
 
 app.use('/api/auth', authRateLimit);
+app.use((req, _res, next) => {
+  if (req.url === '/api/auth/forget-password') {
+    req.url = '/api/auth/request-password-reset';
+  }
+  next();
+});
+  app.all('/api/auth/*splat', (req, res, next) => {
+  // #region debug-point H3
+  fetch('http://localhost:7777/event', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ runId: 'pre-fix', hypothesisId: 'H3', msg: 'DEBUG: Auth request received', url: req.url, method: req.method, body: req.body }) }).catch(() => {});
+  // #endregion
+  next();
+});
 app.all('/api/auth/*splat', toNodeHandler(auth));
 app.use('/webhooks', express.raw({ type: 'application/json', limit: '1mb' }), webhookRouter);
 app.use(express.json({ limit: '1mb' }));

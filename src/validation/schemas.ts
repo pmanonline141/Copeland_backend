@@ -82,6 +82,11 @@ export const checkoutSchema = z.object({
   email,
   phone: z.string().trim().min(5).max(40).optional(),
   items: z.array(productOrderItem).min(1).max(100),
+  address: z.string().trim().min(1).max(500).optional(),
+  city: z.string().trim().min(1).max(100).optional(),
+  state: z.string().trim().min(1).max(100).optional(),
+  landmark: z.string().trim().max(300).optional(),
+  notes: z.string().trim().max(1000).optional(),
 });
 export const cancelOrderSchema = z.object({ email });
 export const guestOrderLookupSchema = z.object({
@@ -98,7 +103,7 @@ export const rfqSchema = z.object({
   details: z.string().trim().max(5000).optional(),
 });
 export const rfqAdminUpdateSchema = z.object({
-  status: z.enum(['in_review', 'quoted', 'declined', 'closed']),
+  status: z.enum(['in_review', 'quoted', 'accepted', 'declined', 'closed']),
   quoteAmountKobo: z.number().int().nonnegative().optional(),
   quoteMessage: z.string().trim().max(5000).optional(),
 });

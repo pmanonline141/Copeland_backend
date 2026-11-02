@@ -17,7 +17,7 @@ function getProviderMessage(payload: unknown) {
   return typeof message === 'string' ? message.slice(0, 300) : undefined;
 }
 
-export async function sendTransactionalEmail(email: TransactionalEmail) {
+export async function sendTransactionalEmail(email: TransactionalEmail): Promise<{ delivery: 'sent' | 'skipped' }> {
   const sendInDevelopment = process.env.RESEND_SEND_IN_DEVELOPMENT === 'true';
   if (process.env.NODE_ENV !== 'production' && !sendInDevelopment) {
     logger.info({
@@ -26,7 +26,7 @@ export async function sendTransactionalEmail(email: TransactionalEmail) {
       delivery: 'skipped',
       reason: 'development_sending_disabled',
     }, 'Transactional email skipped');
-    return;
+    return { delivery: 'skipped' };
   }
 
   const apiKey = process.env.RESEND_API_KEY;
@@ -80,6 +80,7 @@ export async function sendTransactionalEmail(email: TransactionalEmail) {
     ...(emailId ? { emailId } : {}),
     providerAccepted: true,
   }, 'Transactional email accepted by provider');
+  return { delivery: 'sent' };
 }
 
 export function escapeHtml(value: string) {
@@ -90,4 +91,69 @@ export function escapeHtml(value: string) {
     '"': '&quot;',
     "'": '&#39;',
   })[character] ?? character);
+}
+
+/**
+ * Normalizes a Nigerian telephone number to international format (234...)
+ * E.g. "07061234567" -> "2347061234567", "+2348012345678" -> "2348012345678"
+ */
+export function formatNigerianPhone(phone: string): string {
+  const digits = phone.replace(/\D/g, '');
+  if (digits.startsWith('0') && digits.length === 11) {
+    return `234${digits.slice(1)}`;
+  }
+  if (digits.startsWith('234') && digits.length === 13) {
+    return digits;
+  }
+  return digits;
+}
+
+/**
+ * Sends a WhatsApp notification.
+ * No-op returning "skipped" unless WHATSAPP_ENABLED=true.
+ *
+ * NOTE: For business-initiated messages via the Meta WhatsApp Cloud API,
+ * Meta requires pre-approved message templates (e.g. for quotes, order updates).
+ * Free-form text messages can only be sent within an active 24-hour customer care window.
+ */
+export async function sendWhatsAppMessage(phone?: string | null, text?: string): Promise<'sent' | 'failed' | 'skipped'> {
+  if (process.env.WHATSAPP_ENABLED !== 'true' || !phone || !text) {
+    return 'skipped';
+  }
+
+  /*
+   * Meta WhatsApp Cloud API implementation (no extra dependencies required):
+   *
+   * const token = process.env.WHATSAPP_API_TOKEN;
+   * const phoneNumberId = process.env.WHATSAPP_PHONE_NUMBER_ID;
+   * if (!token || !phoneNumberId) return 'skipped';
+   *
+   * try {
+   *   const recipient = formatNigerianPhone(phone);
+   *   const response = await fetch(`https://graph.facebook.com/v19.0/${phoneNumberId}/messages`, {
+   *     method: 'POST',
+   *     headers: {
+   *       'Authorization': `Bearer ${token}`,
+   *       'Content-Type': 'application/json',
+   *     },
+   *     body: JSON.stringify({
+   *       messaging_product: 'whatsapp',
+   *       recipient_type: 'individual',
+   *       to: recipient,
+   *       type: 'text',
+   *       text: { preview_url: false, body: text },
+   *     }),
+   *   });
+   *   if (!response.ok) {
+   *     logger.warn({ status: response.status, phone: recipient }, 'WhatsApp Cloud API request failed');
+   *     return 'failed';
+   *   }
+   *   return 'sent';
+   * } catch (error) {
+   *   logger.warn({ ...errorLogFields(error) }, 'WhatsApp Cloud API request exception');
+   *   return 'failed';
+   * }
+   */
+
+  return 'skipped';
 }

@@ -1,4 +1,6 @@
 import { Router } from 'express';
+import { fromNodeHeaders } from 'better-auth/node';
+import { auth } from '../auth/auth.js';
 import { OrderService } from '../services/orders.service.js';
 import { FulfillmentService } from '../services/fulfillment.service.js';
 import { requireApprovedPartner, requireAuth, requireRole } from '../middleware/auth.js';
@@ -60,7 +62,19 @@ ordersRouter.post('/rfqs', validateBody(rfqSchema), async (req, res) => {
     if (!name || !email || !Array.isArray(items)) {
       return res.status(400).json(apiError('INVALID_RFQ', 'Requester name, email, and items are required'));
     }
+
+    let requesterId: string | undefined;
+    try {
+      const session = await auth.api.getSession({ headers: fromNodeHeaders(req.headers) });
+      if (session?.user?.id) {
+        requesterId = session.user.id;
+      }
+    } catch {
+      // Guest RFQ
+    }
+
     const rfq = await FulfillmentService.createRfq({
+      requesterId,
       requesterName: name,
       requesterEmail: email,
       requesterPhone: phone,
@@ -73,6 +87,15 @@ ordersRouter.post('/rfqs', validateBody(rfqSchema), async (req, res) => {
   }
 });
 
+ordersRouter.get('/rfqs/buyer', requireAuth, requireRole('buyer', 'admin', 'staff'), async (req, res) => {
+  try {
+    const buyerRfqs = await FulfillmentService.getBuyerRfqs(req.user!.id);
+    res.json(buyerRfqs);
+  } catch (error) {
+    res.status(500).json(apiError('BUYER_RFQS_FAILED', error instanceof Error ? error.message : 'Unable to fetch RFQs'));
+  }
+});
+
 ordersRouter.get('/rfqs', requireAuth, requireRole('admin', 'staff'), async (req, res) => {
   const status = typeof req.query.status === 'string' ? req.query.status : undefined;
   res.json(await FulfillmentService.listRfqs(status));
@@ -81,7 +104,7 @@ ordersRouter.get('/rfqs', requireAuth, requireRole('admin', 'staff'), async (req
 ordersRouter.patch('/rfqs/:id', requireAuth, requireRole('admin', 'staff'), validateBody(rfqAdminUpdateSchema), async (req, res) => {
   try {
     const { status, quoteAmountKobo, quoteMessage } = req.body as {
-      status?: 'in_review' | 'quoted' | 'declined' | 'closed';
+      status?: 'in_review' | 'quoted' | 'accepted' | 'declined' | 'closed';
       quoteAmountKobo?: number;
       quoteMessage?: string;
     };
@@ -112,6 +135,15 @@ ordersRouter.post('/rfqs/:id/respond', validateBody(rfqResponseSchema), async (r
   }
 });
 
+ordersRouter.get('/shipping/assignments', requireAuth, requireRole('shipping'), requireApprovedPartner, async (req, res) => {
+  try {
+    const assignments = await FulfillmentService.getShippingAssignments(req.partnerId!);
+    res.json(assignments);
+  } catch (error) {
+    res.status(500).json(apiError('SHIPPING_ASSIGNMENTS_FAILED', error instanceof Error ? error.message : 'Unable to fetch assigned deliveries'));
+  }
+});
+
 ordersRouter.post('/shipping/shipments', requireAuth, requireRole('shipping'), requireApprovedPartner, validateBody(shipmentCreateSchema), async (req, res) => {
   try {
     const { orderId, trackingNumber } = req.body as { orderId?: string; trackingNumber?: string };
@@ -139,14 +171,33 @@ ordersRouter.patch('/shipping/shipments/:id', requireAuth, requireRole('shipping
   }
 });
 
+ordersRouter.get('/buyer', requireAuth, requireRole('buyer', 'admin', 'staff'), async (req, res) => {
+  try {
+    const buyerOrders = await OrderService.getBuyerOrders(req.user!.id);
+    res.json(buyerOrders);
+  } catch (error) {
+    res.status(500).json(apiError('BUYER_ORDERS_FAILED', error instanceof Error ? error.message : 'Unable to fetch buyer orders'));
+  }
+});
+
 ordersRouter.post('/checkout', checkoutRateLimit, validateBody(checkoutSchema), async (req, res) => {
   try {
-    const { name, email, phone, items } = req.body;
+    const { name, email, phone, items, address, city, state, landmark, notes } = req.body;
     if (!email || !items || !Array.isArray(items)) {
       return res.status(400).json(apiError('INVALID_CHECKOUT', 'Invalid payload. Need email and items array.'));
     }
 
-    const result = await OrderService.createCheckout(email, items, { name, phone });
+    let buyerId: string | undefined;
+    try {
+      const session = await auth.api.getSession({ headers: fromNodeHeaders(req.headers) });
+      if (session?.user?.id) {
+        buyerId = session.user.id;
+      }
+    } catch {
+      // Proceed as guest
+    }
+
+    const result = await OrderService.createCheckout(email, items, { name, phone, buyerId, address, city, state, landmark, notes });
     
     res.status(201).json({
       message: 'Order created successfully. Ready for payment.',
@@ -191,5 +242,16 @@ ordersRouter.post('/:id/pay', async (req, res) => {
     });
   } catch (error: any) {
     res.status(400).json(apiError('PAYMENT_INITIALIZATION_FAILED', error instanceof Error ? error.message : 'Unable to initialize payment'));
+  }
+});
+
+ordersRouter.post('/verify-payment', async (req, res) => {
+  try {
+    const { reference } = req.body as { reference?: string };
+    if (!reference) return res.status(400).json(apiError('INVALID_REFERENCE', 'Payment reference is required'));
+    const result = await OrderService.verifyAndConfirmPayment(reference);
+    res.json(result);
+  } catch (error: any) {
+    res.status(400).json(apiError('VERIFICATION_FAILED', error instanceof Error ? error.message : 'Unable to verify payment'));
   }
 });

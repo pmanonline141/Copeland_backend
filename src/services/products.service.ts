@@ -1,4 +1,4 @@
-import { and, eq, gte, lte, sql } from 'drizzle-orm';
+import { and, eq, gte, lte, sql, or, ilike } from 'drizzle-orm';
 import { db } from '../db/index.js';
 import { auditLog, moderationRecords, partners, productInventory, products } from '../db/schema/index.js';
 import { sendTransactionalEmail } from './notifications.service.js';
@@ -47,6 +47,34 @@ export function statusAfterSupplierEdit(currentStatus: string) {
 
 export function assertProductHasSubmissionImages(images: string[]) {
   if (images.length < 3) throw new Error('At least three product images are required before submission');
+}
+
+export function normalizeCategoryFilter(cat?: string): string | undefined {
+  if (!cat?.trim()) return undefined;
+  const c = cat.trim().toLowerCase();
+  const map: Record<string, string> = {
+    kids: "Kids' wear",
+    "kids' wear": "Kids' wear",
+    "kids wear": "Kids' wear",
+    women: "Women's wear",
+    "women's wear": "Women's wear",
+    "womens wear": "Women's wear",
+    men: "Men's wear",
+    "men's wear": "Men's wear",
+    "mens wear": "Men's wear",
+    uniforms: "Uniforms & workwear",
+    "uniforms & workwear": "Uniforms & workwear",
+    "uniforms and workwear": "Uniforms & workwear",
+    scrubs: "Medical scrubs",
+    "medical scrubs": "Medical scrubs",
+    "medical & scrubs": "Medical scrubs",
+    ppe: "Uniforms & workwear",
+    hospitality: "Uniforms & workwear",
+    fabric: "Fabric & textiles",
+    "fabric & textiles": "Fabric & textiles",
+    accessories: "Accessories",
+  };
+  return map[c] ?? cat.trim();
 }
 
 export class ProductService {
@@ -187,7 +215,16 @@ export class ProductService {
       eq(products.status, 'approved'),
       eq(partners.status, 'approved'),
     ];
-    if (filters.category) clauses.push(eq(products.category, filters.category));
+    if (filters.category) {
+      const resolved = normalizeCategoryFilter(filters.category);
+      clauses.push(
+        or(
+          eq(products.category, resolved!),
+          ilike(products.category, `%${resolved}%`),
+          ilike(products.category, `%${filters.category}%`)
+        )!
+      );
+    }
     if (filters.minPrice !== undefined) clauses.push(gte(products.priceKobo, filters.minPrice));
     if (filters.maxPrice !== undefined) clauses.push(lte(products.priceKobo, filters.maxPrice));
     if (filters.isCopelandLabel !== undefined) clauses.push(eq(products.isCopelandLabel, filters.isCopelandLabel));
@@ -227,5 +264,28 @@ export class ProductService {
 
   static async getPartnerProducts(partnerId: string) {
     return db.select().from(products).where(eq(products.partnerId, partnerId));
+  }
+
+  static async getPartnerProduct(productId: string, partnerId: string) {
+    const [product] = await db.select().from(products).where(and(
+      eq(products.id, productId),
+      eq(products.partnerId, partnerId),
+    ));
+    return product ?? null;
+  }
+
+  static async getProductById(productId: string) {
+    const rows = await db.select({
+      product: products,
+      supplierName: partners.businessName,
+    }).from(products)
+      .leftJoin(partners, eq(products.partnerId, partners.id))
+      .where(eq(products.id, productId));
+    const row = rows[0];
+    if (!row) return null;
+    return {
+      ...row.product,
+      supplier: { name: row.supplierName ?? 'Copeland', id: row.product.partnerId },
+    };
   }
 }

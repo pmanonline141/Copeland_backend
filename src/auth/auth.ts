@@ -10,6 +10,7 @@ import {
   verificationEmail,
   welcomeEmail,
 } from "../services/email-templates.js";
+import { OrderService } from "../services/orders.service.js";
 
 function getFrontendUrl() {
   const configured = process.env.FRONTEND_URL
@@ -19,10 +20,12 @@ function getFrontendUrl() {
   return new URL(configured).origin;
 }
 
-function getPasswordResetUrl(url: string) {
-  const resetUrl = new URL(url);
-  resetUrl.searchParams.set('callbackURL', `${getFrontendUrl()}/reset-password`);
-  return resetUrl.toString();
+const trustedOrigins = (process.env.FRONTEND_ORIGINS ?? '')
+  .split(',')
+  .map((origin) => origin.trim())
+  .filter(Boolean);
+if (process.env.FRONTEND_URL && !trustedOrigins.includes(process.env.FRONTEND_URL)) {
+  trustedOrigins.push(process.env.FRONTEND_URL);
 }
 
 export const auth = betterAuth({
@@ -42,7 +45,7 @@ export const auth = betterAuth({
     requireEmailVerification: true,
     sendResetPassword: async ({ user, url }) => {
       await sendTransactionalEmail({
-        ...passwordResetEmail(user.email, user.name, getPasswordResetUrl(url)),
+        ...passwordResetEmail(user.email, user.name, url),
         emailType: 'password_reset',
       });
     },
@@ -75,6 +78,31 @@ export const auth = betterAuth({
             ),
             emailType: 'welcome',
           });
+          if (createdUser.emailVerified) {
+            await OrderService.linkGuestOrdersToUser(createdUser.id, createdUser.email).catch((err) => {
+              logger.error({ err, userId: createdUser.id }, 'Failed to link guest orders on registration');
+            });
+          }
+        },
+      },
+      update: {
+        after: async (updatedUser) => {
+          if (updatedUser?.id && updatedUser?.emailVerified) {
+            await OrderService.linkGuestOrdersToUser(updatedUser.id, updatedUser.email).catch((err) => {
+              logger.error({ err, userId: updatedUser.id }, 'Failed to link guest orders on email verification');
+            });
+          }
+        },
+      },
+    },
+    session: {
+      create: {
+        after: async (session) => {
+          if (session?.userId) {
+            await OrderService.linkGuestOrdersToUser(session.userId).catch((err) => {
+              logger.error({ err, userId: session.userId }, 'Failed to link guest orders on login session creation');
+            });
+          }
         },
       },
     },

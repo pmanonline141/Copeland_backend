@@ -8,6 +8,9 @@ import { OrderService } from './services/orders.service.js';
 async function startServer() {
   try {
     validateEnvironment();
+    // #region debug-point H2
+    fetch('http://localhost:7777/event', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ runId: 'pre-fix', hypothesisId: 'H2', msg: 'DEBUG: Environment validated' }) }).catch(() => {});
+    // #endregion
   } catch (error) {
     logger.fatal({
       errorMessage: error instanceof Error ? error.message : 'Environment validation failed',
@@ -22,6 +25,9 @@ async function startServer() {
       FROM pg_roles
       WHERE rolname = current_user
     `);
+    // #region debug-point H2-role
+    fetch('http://localhost:7777/event', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ runId: 'pre-fix', hypothesisId: 'H2', msg: 'DEBUG: Role check result', bypass_rls: roleResult.rows[0]?.bypass_rls }) }).catch(() => {});
+    // #endregion
   } catch (error) {
     throw new Error(
       'Unable to verify application database role. Check DATABASE_URL credentials and database connectivity.',

@@ -88,3 +88,104 @@ export function payoutSentEmail(to: string, amountKobo: number, reference: strin
   return message(to, title, title, 'A payout has been recorded for your account.',
     `<p>A payout of ${amountKobo.toLocaleString('en-NG')} kobo was sent.</p><p>Reference: <strong>${escapeHtml(reference)}</strong></p>`);
 }
+
+export function rfqQuoteEmail(
+  to: string,
+  requesterName: string,
+  rfqId: string,
+  quoteAmountKobo: number,
+  quoteMessage: string,
+  items: Array<{ name: string; quantity: number; size?: string; colour?: string }>,
+) {
+  const shortId = rfqId.slice(0, 8).toUpperCase();
+  const subject = `Your Copeland quote #${shortId}`;
+  const title = `Your Copeland quote #${shortId}`;
+
+  const naira = quoteAmountKobo / 100;
+  const formattedTotal = '₦' + naira.toLocaleString('en-NG', {
+    minimumFractionDigits: quoteAmountKobo % 100 === 0 ? 0 : 2,
+    maximumFractionDigits: 2,
+  });
+
+  const rows = items.map((item) => `
+    <tr style="border-bottom:1px solid #e5e7eb">
+      <td style="padding:10px 8px;font-weight:500">${escapeHtml(item.name)}</td>
+      <td style="padding:10px 8px;text-align:center">${escapeHtml(String(item.quantity))}</td>
+      <td style="padding:10px 8px">${escapeHtml(item.size || '—')}</td>
+      <td style="padding:10px 8px">${escapeHtml(item.colour || '—')}</td>
+    </tr>
+  `).join('');
+
+  const itemsTable = `
+    <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="margin:20px 0;border-collapse:collapse;font-size:14px">
+      <thead>
+        <tr style="background:#f9fafb;border-bottom:2px solid #e5e7eb;text-align:left">
+          <th style="padding:10px 8px;font-weight:600">Product</th>
+          <th style="padding:10px 8px;font-weight:600;text-align:center">Quantity</th>
+          <th style="padding:10px 8px;font-weight:600">Size</th>
+          <th style="padding:10px 8px;font-weight:600">Colour</th>
+        </tr>
+      </thead>
+      <tbody>
+        ${rows}
+      </tbody>
+    </table>
+  `;
+
+  const content = `
+    <p>Hello ${escapeHtml(requesterName)},</p>
+    <p>We have reviewed your request for quote (ref: <strong>#${shortId}</strong>). Here is our official quotation:</p>
+    <div style="margin:24px 0;padding:20px;background:#fdfcf9;border:1px solid #e6d2a0;border-radius:6px">
+      <p style="margin:0 0 6px;font-size:12px;font-weight:bold;text-transform:uppercase;color:#7a5a2c;letter-spacing:0.05em">Quote Amount</p>
+      <p style="margin:0;font-size:26px;font-weight:bold;color:#1b1b1b">${formattedTotal}</p>
+    </div>
+    <div style="margin:20px 0">
+      <p style="margin:0 0 8px;font-size:13px;font-weight:bold;color:#4a4a4a;text-transform:uppercase">Message from Copeland Team:</p>
+      <div style="padding:16px;background:#f9fafb;border-left:4px solid #b78d44;border-radius:4px;font-size:14px;line-height:1.6;white-space:pre-wrap">${escapeHtml(quoteMessage)}</div>
+    </div>
+    <p style="margin-top:24px;font-size:13px;font-weight:bold;color:#4a4a4a;text-transform:uppercase">Requested Items:</p>
+    ${itemsTable}
+    <p style="margin-top:24px;padding:16px;background:#f3f4f6;border-radius:6px;font-size:14px;color:#1f2937">
+      To accept this quote or discuss custom specifications, simply <strong>reply directly to this email</strong>.
+    </p>
+  `;
+
+  return message(to, subject, title, `Your Copeland quote #${shortId}: ${formattedTotal}`, content);
+}
+
+export function rfqConfirmationEmail(to: string, name: string, rfqId: string) {
+  const shortId = rfqId.slice(0, 8).toUpperCase();
+  const title = 'Quote request received';
+  const subject = `Copeland RFQ received #${shortId}`;
+  return message(
+    to,
+    subject,
+    title,
+    `We have received your quote request #${shortId}`,
+    `<p>Hello ${escapeHtml(name)},</p>
+     <p>Thank you for submitting your bulk quote request (reference <strong>#${shortId}</strong>).</p>
+     <p>Our team is currently reviewing your requested items and volumes. We will reply by email shortly with an official quotation and fulfillment timeline.</p>
+     <p style="margin-top:20px;font-size:13px;color:#6b7280">If you have any urgent inquiries, you can reply directly to this email with your reference number.</p>`,
+  );
+}
+
+export function rfqAdminAlertEmail(
+  to: string,
+  rfq: { id: string; requesterName: string; requesterEmail: string; itemCount: number },
+) {
+  const shortId = rfq.id.slice(0, 8).toUpperCase();
+  const title = `New RFQ submitted #${shortId}`;
+  return message(
+    to,
+    `[Copeland Admin] New RFQ #${shortId} from ${rfq.requesterName}`,
+    title,
+    `New RFQ #${shortId} with ${rfq.itemCount} items`,
+    `<p>A new request for quote has been submitted on Copeland:</p>
+     <ul>
+       <li><strong>Reference:</strong> #${shortId}</li>
+       <li><strong>Requester:</strong> ${escapeHtml(rfq.requesterName)} (${escapeHtml(rfq.requesterEmail)})</li>
+       <li><strong>Items Count:</strong> ${rfq.itemCount}</li>
+     </ul>
+     <p>Please sign in to the admin dashboard to review and prepare a quotation.</p>`,
+  );
+}
